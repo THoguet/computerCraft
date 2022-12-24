@@ -1,0 +1,8 @@
+{
+	"Lua.diagnostics.globals": [
+		"colors",
+		"paintutils",
+		"term",
+		"window"
+	]
+}
