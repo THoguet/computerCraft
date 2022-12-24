@@ -3,6 +3,7 @@
 		"colors",
 		"paintutils",
 		"term",
-		"window"
+		"window",
+		"peripheral"
 	]
 }
