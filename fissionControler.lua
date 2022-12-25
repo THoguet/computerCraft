@@ -156,7 +156,7 @@ end
 
 local function autoInj()
 	while true do
-		if auto then
+		if auto and data.reactor_on then
 			update_data()
 			last_reactor_heatedCoolent = last_reactor_heatedCoolent or data.reactor_heatedCoolent
 			if data.reactor_heatedCoolent == 0 then
