@@ -1,13 +1,22 @@
+-- Gist get => pastebin get t4RjeKsw gist
+
 local reactor, monitor
 local data = {}
 local buttons = {}
 local computerTerm = term.current()
-local wButtons, wStats, wGraph
+local wButtons, wStats, wGraph, wInfos, wRules
 local injRate = 0.1
 local maxBurnRate
-local last_reactor_heatedCoolent
+local last_reactor_heatedCoolent, last_reactor_coolant
 local auto = false
+local state, startAsked, stopAsked
 
+local STATES = {
+	READY = 1, -- Reactor is off and can be started
+	RUNNING = 2, -- Reactor is running and all rules are met
+	ESTOP = 3, -- Reactor is stopped due to rule(s) being violated
+	UNKNOWN = 4, -- Reactor peripherals are missing
+}
 local function round(val, decimal)
 	if (decimal) then
 		return math.floor((val * 10 ^ decimal) + 0.5) / (10 ^ decimal)
@@ -86,6 +95,7 @@ local function updateButtons()
 	buttons["+inj"]["color"] = colors.green
 	buttons["-inj"]["active"] = true
 	buttons["-inj"]["color"] = colors.red
+	buttons["auto"]["active"] = true
 	buttons["auto"]["color"] = colors.orange
 	if auto then
 		buttons["+inj"]["active"] = false
@@ -93,6 +103,7 @@ local function updateButtons()
 		buttons["-inj"]["active"] = false
 		buttons["-inj"]["color"] = colors.gray
 		buttons["auto"]["color"] = colors.green
+		buttons["auto"]["active"] = true
 	end
 	if data.reactor_burn_rate == 0 then
 		buttons["-inj"]["active"] = false
@@ -101,7 +112,16 @@ local function updateButtons()
 		buttons["+inj"]["active"] = false
 		buttons["+inj"]["color"] = colors.gray
 	end
-	if data.reactor_on then
+	if state == STATES.ESTOP then
+		buttons["startstop"]["title"] = "RESET"
+		buttons["startstop"]["color"] = colors.yellow
+		buttons["+inj"]["active"] = false
+		buttons["+inj"]["color"] = colors.gray
+		buttons["-inj"]["active"] = false
+		buttons["-inj"]["color"] = colors.gray
+		buttons["auto"]["active"] = false
+		buttons["auto"]["color"] = colors.gray
+	elseif data.reactor_on then
 		buttons["startstop"]["title"] = "S.C.R.A.M."
 		buttons["startstop"]["color"] = colors.red
 	else
@@ -159,13 +179,16 @@ local function autoInj()
 		if auto and data.reactor_on then
 			update_data()
 			last_reactor_heatedCoolent = last_reactor_heatedCoolent or data.reactor_heatedCoolent
-			if data.reactor_heatedCoolent == 0 then
+			last_reactor_coolant = last_reactor_coolant or data.reactor_coolant
+			if (data.reactor_heatedCoolent == 0) and (data.reactor_coolant > 0.9) then
 				addInj()
-			elseif data.reactor_heatedCoolent > last_reactor_heatedCoolent then
+			elseif (data.reactor_heatedCoolent > last_reactor_heatedCoolent) or (data.reactor_coolant < last_reactor_coolant) then
 				delInj()
 				last_reactor_heatedCoolent = data.reactor_heatedCoolent
+				last_reactor_coolant = data.reactor_coolant
 			else
 				last_reactor_heatedCoolent = data.reactor_heatedCoolent
+				last_reactor_coolant = data.reactor_coolant
 			end
 		end
 		sleep(1)
@@ -173,10 +196,12 @@ local function autoInj()
 end
 
 local function startStop()
-	if data.reactor_on then
-		reactor.scram()
+	if state == STATES.ESTOP then
+		state = STATES.READY
+	elseif data.reactor_on then
+		stopAsked = true
 	else
-		reactor.activate()
+		startAsked = true
 	end
 end
 
@@ -268,7 +293,7 @@ local function drawGraphs()
 	local nbGraph = 6
 	local hGraph = round(h / (nbGraph + 3)) - 1
 	local spaceBetween = round(hGraph / (nbGraph - 1)) + 2
-	drawGraph("DAMAGE", 1, 1, w, hGraph, data.reactor_damage, colors.gray, colors.red)
+	drawGraph("DAMAGE", 1, 1, w, hGraph, data.reactor_damage / 100, colors.gray, colors.red)
 	drawGraph("INJ-RATE", 1, 1 + (hGraph + spaceBetween), w, hGraph, data.reactor_burn_rate / data.reactor_max_burn_rate,
 		colors.gray, colors.pink)
 	drawGraph("COOLANT", 1, 1 + (hGraph + spaceBetween) * 2, w, hGraph, data.reactor_coolant, colors.gray, colors.blue)
@@ -289,11 +314,163 @@ local function drawAll()
 	end
 end
 
+local rules = {}
+
+local function add_rule(name, fn)
+	table.insert(rules, function()
+		local ok, rule_met, value = pcall(fn)
+		if ok then
+			return rule_met, string.format("%s (%s)", name, value)
+		else
+			return false, name
+		end
+	end)
+end
+
+add_rule("REACTOR TEMPERATURE   <= 745K", function()
+	local value = string.format("%3dK", math.ceil(data.reactor_temp))
+	return data.reactor_temp <= 745, value
+end)
+
+add_rule("REACTOR DAMAGE        <=  10%", function()
+	local value = string.format("%3d%%", math.ceil(data.reactor_damage))
+	return data.reactor_damage / 100 <= 0.10, value
+end)
+
+add_rule("REACTOR COOLANT LEVEL >=  80%", function()
+	local value = string.format("%3d%%", math.floor(data.reactor_coolant * 100))
+	return data.reactor_coolant >= 0.80, value
+end)
+
+add_rule("REACTOR HCOOLANT LEVEL<=  95%", function()
+	local value = string.format("%3d%%", math.floor(data.reactor_heatedCoolent * 100))
+	return data.reactor_heatedCoolent <= 0.95, value
+end)
+
+add_rule("REACTOR WASTE LEVEL   <=  90%", function()
+	local value = string.format("%3d%%", math.ceil(data.reactor_waste * 100))
+	return data.reactor_waste <= 0.90, value
+end)
+
+local function all_rules_met()
+	for i, rule in ipairs(rules) do
+		if not rule() then
+			return false
+		end
+	end
+	-- Allow manual emergency stop with SCRAM button
+	return state ~= STATES.RUNNING or data.reactor_on
+end
+
+local function update_info()
+	local prev_term = term.redirect(wInfos)
+
+	term.clear()
+	term.setCursorPos(1, 1)
+
+	if state == STATES.UNKNOWN then
+		colored("ERROR RETRIEVING DATA", colors.red)
+		return
+	end
+
+	colored("REACTOR: ")
+	colored(data.reactor_on and "ON " or "OFF", data.reactor_on and colors.green or colors.red)
+	colored("  R. LIMIT: ")
+	colored(string.format("%4.1f", data.reactor_burn_rate), colors.blue)
+	colored("/", colors.lightGray)
+	colored(string.format("%4.1f", data.reactor_max_burn_rate), colors.blue)
+
+	term.setCursorPos(1, 3)
+
+	colored("STATUS: ")
+	if state == STATES.READY then
+		colored("READY, press TURN ON to start", colors.blue)
+	elseif state == STATES.RUNNING then
+		colored("RUNNING, press S.C.R.A.M. to stop", colors.green)
+	elseif state == STATES.ESTOP and not all_rules_met() then
+		colored("EMERGENCY STOP, safety rules violated", colors.red)
+	elseif state == STATES.ESTOP then
+		colored("EMERGENCY STOP, press RESET", colors.red)
+	end -- STATES.UNKNOWN cases handled above
+
+	term.redirect(prev_term)
+end
+
+local estop_reasons = {}
+
+local function update_rules()
+	local prev_term = term.redirect(wRules)
+
+	term.clear()
+
+	if state ~= STATES.ESTOP then
+		estop_reasons = {}
+	end
+
+	for i, rule in ipairs(rules) do
+		local ok, text = rule()
+		term.setCursorPos(1, i)
+		if ok and not estop_reasons[i] then
+			colored("[  OK  ] ", colors.green)
+			colored(text, colors.lightGray)
+		else
+			colored("[ FAIL ] ", colors.red)
+			colored(text, colors.red)
+			estop_reasons[i] = true
+		end
+	end
+
+	term.redirect(prev_term)
+end
+
+local function updateSafetyLoop()
+	while true do
+		if data.reactor_on == nil then
+			-- Reactor is not connected
+			state = STATES.UNKNOWN
+		elseif not state then
+			-- Program just started, get current state from lever
+			state = STATES.READY
+		elseif (state == STATES.READY and startAsked) or (state == STATES.READY and reactor.getStatus()) then
+			-- READY -> RUNNING
+			state = STATES.RUNNING
+			-- Activate reactor
+			pcall(reactor.activate)
+			startAsked = false
+			data.reactor_on = true
+		elseif (state == STATES.RUNNING and stopAsked) or (state == STATES.RUNNING and not reactor.getStatus()) then
+			-- RUNNING -> READY
+			state = STATES.READY
+			pcall(reactor.scram)
+			stopAsked = false
+			data.reactor_on = false
+		end
+		-- Always enter ESTOP if safety rules are not met
+		if state ~= STATES.UNKNOWN and not all_rules_met() then
+			state = STATES.ESTOP
+		end
+
+		-- SCRAM reactor if not running
+		if state ~= STATES.RUNNING and reactor then
+			pcall(reactor.scram)
+		end
+
+		-- Update info and rules windows
+		pcall(update_info)
+		pcall(update_rules)
+		sleep(1)
+	end
+end
+
 local function main()
 	getPeripherals()
+	term.clear()
+	local width = term.getSize()
 	monitor.setTextScale(0.5)
 	local w, h = monitor.getSize()
 	update_data()
+	wInfos = makeSection("INFORMATION", 2, 2, width - 2, 7, computerTerm)
+	wRules = makeSection("SAFETY RULES", 2, 10, width - 2, 9, computerTerm)
 	wStats = makeSection("Infos", 1, 1, round(w / 3) - 1, round(h / 2) - 1, monitor)
 	wButtons = makeSection("Buttons", 1, round(h / 2) + 1, round(w / 3) - 1, round(h / 2), monitor)
 	wGraph = makeSection("Graphics", round(w / 3) + 1, 1, round(w / 3 * 2), h, monitor)
@@ -305,7 +482,7 @@ local function main()
 	setButton("-inj", "- Inj", delInj, 1, 1 + hButton + spaceBetween, w, hButton, colors.gray, colors.white)
 	setButton("auto", "Auto Inj", toggleAuto, 1, 1 + (spaceBetween + hButton) * 2, w, hButton, colors.gray, colors.white)
 	setButton("startstop", "Start", startStop, 1, 1 + (spaceBetween + hButton) * 3, w, hButton, colors.green, colors.white)
-	parallel.waitForAny(autoInj, clickEvent, drawAll)
+	parallel.waitForAny(autoInj, clickEvent, drawAll, updateSafetyLoop)
 end
 
 main()
