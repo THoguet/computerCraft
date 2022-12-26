@@ -63,7 +63,7 @@ end
 
 local function forward()
 	if not turtle.forward() then
-		goUp()
+		goDown()
 		forward()
 	end
 	currentDir()
@@ -170,7 +170,7 @@ local function placeBlock()
 	if nbBlocs % 64 == 0 then
 		setSlotBloc()
 	end
-	if turtle.placeUp() then
+	if turtle.placeDown() then
 		nbBlocs = nbBlocs - 1
 	end
 end
@@ -192,7 +192,10 @@ local function fill()
 		while nbLine < 2 do
 			while toDoLine > 0 do
 				checkFuel()
-				placeBlock()
+				while not turtle.detectDown() do
+					placeBlock()
+					sleep(1)
+				end
 				forward()
 				toDoLine = toDoLine - 1
 			end
@@ -209,8 +212,8 @@ local function main()
 	xC, yC, zC, currentDir = 0, 0, 0, direction.NORTH
 	nbFuel, nbBlocs = 0, 0
 	refill()
-	goUp()
-	goUp()
+	goDown()
+	goDown()
 	sizeLine, toDoLine = 1, 1
 	fill()
 end
