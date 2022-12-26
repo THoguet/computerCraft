@@ -4,6 +4,7 @@
 		"paintutils",
 		"term",
 		"window",
-		"peripheral"
+		"peripheral",
+		"turtle"
 	]
 }
